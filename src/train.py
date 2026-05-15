@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import wandb
 
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 from model.promptir import PromptIR
@@ -52,7 +52,7 @@ def apply_dense_mixup_cutmix(x: torch.Tensor, y: torch.Tensor, alpha: float = 1.
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train PromptIR with Accelerate")
+    parser = argparse.ArgumentParser(description="Train PromptIR with Accelerate & Validation")
     parser.add_argument("--data_dir", type=str, default="dataset/train")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -61,17 +61,22 @@ def main():
     parser.add_argument("--save_dir", type=str, default="checkpoints")
     args = parser.parse_args()
 
-    # LIBRARY: Initialize Accelerator (replaces mp.spawn and wandb.init manual logic)
-    accelerator = Accelerator(log_with="wandb", mixed_precision="fp16")
+    ddp_kwargs = DistributedDataParallelKwargs(gradient_as_bucket_view=True)
+    accelerator = Accelerator(log_with="wandb", mixed_precision="fp16", kwargs_handlers=[ddp_kwargs])
+
     set_seed(42 + accelerator.process_index)
 
     if accelerator.is_main_process:
         os.makedirs(args.save_dir, exist_ok=True)
         accelerator.init_trackers("PromptIR-Restoration", config=vars(args))
 
-    dataset = RestorationDataset(root_dir=args.data_dir, is_train=True)
-    # Accelerator auto-injects DistributedSampler if on multiple GPUs
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    # Initialize Train and Validation Datasets
+    train_dataset = RestorationDataset(root_dir=args.data_dir, mode='train', val_split=0.1)
+    val_dataset = RestorationDataset(root_dir=args.data_dir, mode='val', val_split=0.1)
+
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4,
+                                  pin_memory=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     model = PromptIR()
     # model = torch.compile(model)
@@ -80,40 +85,38 @@ def main():
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
     criterion = CompositeLoss(fft_weight=0.1)
 
-    psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(accelerator.device)
-    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(accelerator.device)
+    # Separate metrics for Train and Val
+    train_psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(accelerator.device)
+    val_psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(accelerator.device)
+    val_ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(accelerator.device)
 
-    model, optimizer, dataloader, scheduler, criterion = accelerator.prepare(
-        model, optimizer, dataloader, scheduler, criterion
+    # Pass all components to accelerate
+    model, optimizer, train_dataloader, val_dataloader, scheduler, criterion = accelerator.prepare(
+        model, optimizer, train_dataloader, val_dataloader, scheduler, criterion
     )
 
-    best_psnr = 0.0
+    best_val_psnr = 0.0
 
     epoch_iterator = tqdm(range(args.epochs), desc="Overall Progress", disable=not accelerator.is_local_main_process,
                           dynamic_ncols=True)
     for epoch in epoch_iterator:
+
+        # ==================== TRAINING PHASE ====================
         model.train()
-        psnr_metric.reset()
-        ssim_metric.reset()
+        train_psnr_metric.reset()
+        epoch_train_losses = []
 
-        epoch_losses = []
-        pbar = tqdm(dataloader, desc=f"Epoch [{epoch + 1}/{args.epochs}]", leave=False,
-                    disable=not accelerator.is_local_main_process)
+        train_pbar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.epochs}] Train", leave=False,
+                          disable=not accelerator.is_local_main_process)
 
-        visual_sample = None
-
-        for degraded, clean in pbar:
-            # accelerator automatically places tensors on the correct device
-            if visual_sample is None and accelerator.is_main_process:
-                visual_sample = (degraded[:1].clone(), clean[:1].clone())
-
+        for degraded, clean in train_pbar:
             if random.random() < 0.5:
                 degraded, clean = apply_dense_mixup_cutmix(degraded, clean)
 
             optimizer.zero_grad()
 
             output = model(degraded)
-            loss, loss_dict = criterion(output, clean)
+            loss, _ = criterion(output, clean)
 
             accelerator.backward(loss)
 
@@ -123,38 +126,77 @@ def main():
             optimizer.step()
 
             output_clamped = torch.clamp(output, 0.0, 1.0)
-            psnr_metric.update(output_clamped, clean)
+            train_psnr_metric.update(output_clamped, clean)
+            epoch_train_losses.append(loss.item())
 
-            epoch_losses.append(loss.item())
             if accelerator.is_local_main_process:
-                pbar.set_postfix({'Loss': f"{loss.item():.4f}"})
+                train_pbar.set_postfix({'Loss': f"{loss.item():.4f}"})
 
         scheduler.step()
 
         # Wait for all GPUs to finish the epoch
         accelerator.wait_for_everyone()
 
-        current_psnr = psnr_metric.compute().item()
+        current_train_psnr = train_psnr_metric.compute().item()
+        avg_train_loss = np.mean(epoch_train_losses)
 
-        # Now only the main process handles the logging and saving
+        # ==================== VALIDATION PHASE ====================
+        model.eval()
+        val_psnr_metric.reset()
+        val_ssim_metric.reset()
+        epoch_val_losses = []
+
+        val_pbar = tqdm(val_dataloader, desc=f"Epoch [{epoch + 1}/{args.epochs}] Val", leave=False,
+                        disable=not accelerator.is_local_main_process)
+        visual_sample = None
+
+        with torch.no_grad():
+            for degraded, clean in val_pbar:
+                # Capture one batch for W&B visualization
+                if visual_sample is None and accelerator.is_main_process:
+                    visual_sample = (degraded[:1].clone(), clean[:1].clone())
+
+                output = model(degraded)
+                loss, _ = criterion(output, clean)
+
+                output_clamped = torch.clamp(output, 0.0, 1.0)
+                val_psnr_metric.update(output_clamped, clean)
+                val_ssim_metric.update(output_clamped, clean)
+                epoch_val_losses.append(loss.item())
+
+        accelerator.wait_for_everyone()
+
+        current_val_psnr = val_psnr_metric.compute().item()
+        current_val_ssim = val_ssim_metric.compute().item()
+        avg_val_loss = np.mean(epoch_val_losses)
+
+        # ==================== LOGGING & SAVING ====================
         if accelerator.is_main_process:
-            avg_loss = np.mean(epoch_losses)
 
-            # Log visual progress
-            model.eval()
-            with torch.no_grad():
-                sample_pred = torch.clamp(model(visual_sample[0]), 0.0, 1.0)
-                stitched = torch.cat([visual_sample[0][0], sample_pred[0], visual_sample[1][0]], dim=2)
-                accelerator.log({"Visuals/Restoration": wandb.Image(stitched, caption="In | Pred | GT")}, step=epoch)
+            # W&B Visuals
+            sample_pred = torch.clamp(model(visual_sample[0]), 0.0, 1.0)
+            stitched = torch.cat([visual_sample[0][0], sample_pred[0], visual_sample[1][0]], dim=2)
 
-            accelerator.log({"Train/Loss": avg_loss, "Train/PSNR": current_psnr}, step=epoch)
+            accelerator.log({
+                "Train/Loss": avg_train_loss,
+                "Train/PSNR": current_train_psnr,
+                "Val/Loss": avg_val_loss,
+                "Val/PSNR": current_val_psnr,
+                "Val/SSIM": current_val_ssim,
+                "Visuals/Restoration": wandb.Image(stitched, caption="In | Pred | GT")
+            }, step=epoch)
 
+            # Log to console
+            tqdm.write(
+                f"Epoch {epoch + 1} | Train Loss: {avg_train_loss:.4f} | Val PSNR: {current_val_psnr:.2f} | Val SSIM: {current_val_ssim:.4f}")
+
+            # Save logic now strictly evaluates generalizability via Validation PSNR
             unwrapped_model = accelerator.unwrap_model(model)
 
-            if current_psnr > best_psnr:
-                best_psnr = current_psnr
+            if current_val_psnr > best_val_psnr:
+                best_val_psnr = current_val_psnr
                 torch.save(unwrapped_model.state_dict(), os.path.join(args.save_dir, "best_model.pth"))
-                tqdm.write(f"New Best Model Saved (PSNR: {best_psnr:.2f})")
+                tqdm.write(f"New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
 
     accelerator.end_training()
 
