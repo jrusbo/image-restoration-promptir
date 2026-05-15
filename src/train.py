@@ -225,10 +225,31 @@ def main():
             # Save logic now strictly evaluates generalizability via Validation PSNR
             unwrapped_model = accelerator.unwrap_model(model)
 
+            # Save latest model every epoch
+            # latest_model_path = os.path.join(args.save_dir, "latest_model.pth")
+            # torch.save(unwrapped_model.state_dict(), latest_model_path)
+
+            # Save best model if PSNR improves
             if current_val_psnr > best_val_psnr:
                 best_val_psnr = current_val_psnr
-                torch.save(unwrapped_model.state_dict(), os.path.join(args.save_dir, "best_model.pth"))
-                tqdm.write(f"New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
+                best_model_path = os.path.join(args.save_dir, "best_model.pth")
+                torch.save(unwrapped_model.state_dict(), best_model_path)
+                tqdm.write(f"🌟 New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
+
+    # --- FINAL W&B UPLOAD ---
+    # We wait for everyone to finish the epoch loop, then upload the local files to the cloud.
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        tqdm.write("\nUploading final models to Weights & Biases...")
+
+        # wandb.save() securely pushes the files from the local directory to the run's cloud storage
+        if os.path.exists(os.path.join(args.save_dir, "best_model.pth")):
+            wandb.save(os.path.join(args.save_dir, "best_model.pth"), base_path=args.save_dir)
+            tqdm.write("best_model.pth uploaded.")
+
+        # if os.path.exists(os.path.join(args.save_dir, "latest_model.pth")):
+        #     wandb.save(os.path.join(args.save_dir, "latest_model.pth"), base_path=args.save_dir)
+        #     tqdm.write("latest_model.pth uploaded.")
 
     accelerator.end_training()
 
