@@ -112,16 +112,16 @@ def main():
     for epoch in range(args.epochs):
 
         if accelerator.is_main_process:
-            print(f"\n--- Epoch [{epoch + 1}/{args.epochs}] ---")
+            tqdm.write(f"\n--- Epoch [{epoch + 1}/{args.epochs}] ---")
 
-        # ==================== TRAINING PHASE ====================
+        # --- TRAINING PHASE ---
         model.train()
         train_psnr_metric.reset()
         epoch_train_losses = []
 
-        # Clean inner bar pointing to stdout
+        # dynamic_ncols fixes the terminal wrapping issue
         train_pbar = tqdm(train_dataloader, desc="Training", leave=False, disable=not accelerator.is_local_main_process,
-                          file=sys.stdout)
+                          file=sys.stdout, dynamic_ncols=True)
 
         for degraded, clean in train_pbar:
             if random.random() < 0.5:
@@ -146,21 +146,19 @@ def main():
                 train_pbar.set_postfix({'Loss': f"{loss.item():.4f}"})
 
         scheduler.step()
-
-        # Wait for all GPUs to finish the epoch
         accelerator.wait_for_everyone()
 
         current_train_psnr = train_psnr_metric.compute().item()
         avg_train_loss = np.mean(epoch_train_losses)
 
-        # ==================== VALIDATION PHASE ====================
+        # --- VALIDATION PHASE ---
         model.eval()
         val_psnr_metric.reset()
         val_ssim_metric.reset()
         epoch_val_losses = []
 
         val_pbar = tqdm(val_dataloader, desc="Validation", leave=False, disable=not accelerator.is_local_main_process,
-                        file=sys.stdout)
+                        file=sys.stdout, dynamic_ncols=True)
 
         with torch.no_grad():
             for degraded, clean in val_pbar:
@@ -178,7 +176,7 @@ def main():
         current_val_ssim = val_ssim_metric.compute().item()
         avg_val_loss = np.mean(epoch_val_losses)
 
-        # ==================== LOGGING & SAVING ====================
+        # --- LOGGING & SAVING ---
         if accelerator.is_main_process:
 
             # W&B Visuals: Generate grid using the fixed rain/snow samples
@@ -202,8 +200,7 @@ def main():
                                                    caption="Top: Rain, Bottom: Snow | Left: Degraded, Mid: Restored, Right: Clean")
             }, step=epoch)
 
-            # Log clean summary to console
-            print(
+            tqdm.write(
                 f"Train Loss: {avg_train_loss:.4f} | Val PSNR: {current_val_psnr:.2f} | Val SSIM: {current_val_ssim:.4f}")
 
             # Save logic now strictly evaluates generalizability via Validation PSNR
@@ -212,7 +209,7 @@ def main():
             if current_val_psnr > best_val_psnr:
                 best_val_psnr = current_val_psnr
                 torch.save(unwrapped_model.state_dict(), os.path.join(args.save_dir, "best_model.pth"))
-                print(f"New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
+                tqdm.write(f"New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
 
     accelerator.end_training()
 
