@@ -1,16 +1,15 @@
 import argparse
 import os
+import sys
 import random
-
 import numpy as np
-
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import wandb
 
-from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate import Accelerator
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 from model.promptir import PromptIR
@@ -61,9 +60,7 @@ def main():
     parser.add_argument("--save_dir", type=str, default="checkpoints")
     args = parser.parse_args()
 
-    ddp_kwargs = DistributedDataParallelKwargs(gradient_as_bucket_view=True)
-    accelerator = Accelerator(log_with="wandb", mixed_precision="fp16", kwargs_handlers=[ddp_kwargs])
-
+    accelerator = Accelerator(log_with="wandb", mixed_precision="fp16")
     set_seed(42 + accelerator.process_index)
 
     if accelerator.is_main_process:
@@ -95,26 +92,42 @@ def main():
         model, optimizer, train_dataloader, val_dataloader, scheduler, criterion
     )
 
+    # --- Pre-select fixed visual samples for W&B ---
+    fixed_deg, fixed_clean = None, None
+    if accelerator.is_main_process:
+        # Find the first rain and first snow image indices from the val set
+        rain_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'rain' in name)
+        snow_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'snow' in name)
+
+        rain_deg, rain_clean = val_dataset[rain_idx]
+        snow_deg, snow_clean = val_dataset[snow_idx]
+
+        # Stack them into a static batch: shape (2, 3, 256, 256)
+        fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
+        fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
+
     best_val_psnr = 0.0
 
-    epoch_iterator = tqdm(range(args.epochs), desc="Overall Progress", disable=not accelerator.is_local_main_process,
-                          dynamic_ncols=True)
-    for epoch in epoch_iterator:
+    # Flattened the loops: No outer tqdm wrapper, just cleanly printed epochs.
+    for epoch in range(args.epochs):
+
+        if accelerator.is_main_process:
+            print(f"\n--- Epoch [{epoch + 1}/{args.epochs}] ---")
 
         # ==================== TRAINING PHASE ====================
         model.train()
         train_psnr_metric.reset()
         epoch_train_losses = []
 
-        train_pbar = tqdm(train_dataloader, desc=f"Epoch [{epoch + 1}/{args.epochs}] Train", leave=False,
-                          disable=not accelerator.is_local_main_process)
+        # Clean inner bar pointing to stdout
+        train_pbar = tqdm(train_dataloader, desc="Training", leave=False, disable=not accelerator.is_local_main_process,
+                          file=sys.stdout)
 
         for degraded, clean in train_pbar:
             if random.random() < 0.5:
                 degraded, clean = apply_dense_mixup_cutmix(degraded, clean)
 
             optimizer.zero_grad()
-
             output = model(degraded)
             loss, _ = criterion(output, clean)
 
@@ -146,16 +159,11 @@ def main():
         val_ssim_metric.reset()
         epoch_val_losses = []
 
-        val_pbar = tqdm(val_dataloader, desc=f"Epoch [{epoch + 1}/{args.epochs}] Val", leave=False,
-                        disable=not accelerator.is_local_main_process)
-        visual_sample = None
+        val_pbar = tqdm(val_dataloader, desc="Validation", leave=False, disable=not accelerator.is_local_main_process,
+                        file=sys.stdout)
 
         with torch.no_grad():
             for degraded, clean in val_pbar:
-                # Capture one batch for W&B visualization
-                if visual_sample is None and accelerator.is_main_process:
-                    visual_sample = (degraded[:1].clone(), clean[:1].clone())
-
                 output = model(degraded)
                 loss, _ = criterion(output, clean)
 
@@ -173,9 +181,16 @@ def main():
         # ==================== LOGGING & SAVING ====================
         if accelerator.is_main_process:
 
-            # W&B Visuals
-            sample_pred = torch.clamp(model(visual_sample[0]), 0.0, 1.0)
-            stitched = torch.cat([visual_sample[0][0], sample_pred[0], visual_sample[1][0]], dim=2)
+            # W&B Visuals: Generate grid using the fixed rain/snow samples
+            with torch.no_grad():
+                fixed_pred = torch.clamp(model(fixed_deg), 0.0, 1.0)
+
+                # Top Row: Rain (In | Pred | Clean)
+                row_rain = torch.cat([fixed_deg[0], fixed_pred[0], fixed_clean[0]], dim=2)
+                # Bottom Row: Snow (In | Pred | Clean)
+                row_snow = torch.cat([fixed_deg[1], fixed_pred[1], fixed_clean[1]], dim=2)
+
+                stitched_grid = torch.cat([row_rain, row_snow], dim=1)  # Stack vertically
 
             accelerator.log({
                 "Train/Loss": avg_train_loss,
@@ -183,12 +198,13 @@ def main():
                 "Val/Loss": avg_val_loss,
                 "Val/PSNR": current_val_psnr,
                 "Val/SSIM": current_val_ssim,
-                "Visuals/Restoration": wandb.Image(stitched, caption="In | Pred | GT")
+                "Visuals/Restoration": wandb.Image(stitched_grid,
+                                                   caption="Top: Rain, Bottom: Snow | Left: Degraded, Mid: Restored, Right: Clean")
             }, step=epoch)
 
-            # Log to console
-            tqdm.write(
-                f"Epoch {epoch + 1} | Train Loss: {avg_train_loss:.4f} | Val PSNR: {current_val_psnr:.2f} | Val SSIM: {current_val_ssim:.4f}")
+            # Log clean summary to console
+            print(
+                f"Train Loss: {avg_train_loss:.4f} | Val PSNR: {current_val_psnr:.2f} | Val SSIM: {current_val_ssim:.4f}")
 
             # Save logic now strictly evaluates generalizability via Validation PSNR
             unwrapped_model = accelerator.unwrap_model(model)
@@ -196,7 +212,7 @@ def main():
             if current_val_psnr > best_val_psnr:
                 best_val_psnr = current_val_psnr
                 torch.save(unwrapped_model.state_dict(), os.path.join(args.save_dir, "best_model.pth"))
-                tqdm.write(f"New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
+                print(f"New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
 
     accelerator.end_training()
 
