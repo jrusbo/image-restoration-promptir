@@ -134,9 +134,11 @@ def main():
         # Wait for all GPUs to finish the epoch
         accelerator.wait_for_everyone()
 
+        current_psnr = psnr_metric.compute().item()
+
+        # Now only the main process handles the logging and saving
         if accelerator.is_main_process:
             avg_loss = np.mean(epoch_losses)
-            current_psnr = psnr_metric.compute().item()
 
             # Log visual progress
             model.eval()
