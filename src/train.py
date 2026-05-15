@@ -92,19 +92,38 @@ def main():
         model, optimizer, train_dataloader, val_dataloader, scheduler, criterion
     )
 
-    # --- Pre-select fixed visual samples for W&B ---
+    # --- W&B Visual Sample Setup ---
     fixed_deg, fixed_clean = None, None
     if accelerator.is_main_process:
-        # Find the first rain and first snow image indices from the val set
+        # Find the very first rain image in the validation set
         rain_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'rain' in name)
-        snow_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'snow' in name)
+        rain_name = val_dataset.degraded_images[rain_idx]
 
-        rain_deg, rain_clean = val_dataset[rain_idx]
-        snow_deg, snow_clean = val_dataset[snow_idx]
+        # Extract the exact Image ID (e.g., from "rain-42.png" -> "42")
+        image_id = rain_name.replace('rain-', '').replace('.png', '')
 
-        # Stack them into a static batch: shape (2, 3, 256, 256)
-        fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
-        fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
+        # Find the EXACT corresponding snow image with that same ID
+        target_snow_name = f"snow-{image_id}.png"
+
+        try:
+            snow_idx = val_dataset.degraded_images.index(target_snow_name)
+
+            rain_deg, rain_clean = val_dataset[rain_idx]
+            snow_deg, snow_clean = val_dataset[snow_idx]
+
+            fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
+            fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
+            print(f"W&B Visuals locked to Image ID: {image_id} for both Rain and Snow.")
+
+        except ValueError:
+            # Fallback just in case the dataset doesn't have perfectly matching IDs
+            print(
+                f"Warning: Could not find matching snow image for ID {image_id}. Falling back to random snow image.")
+            snow_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'snow' in name)
+            rain_deg, rain_clean = val_dataset[rain_idx]
+            snow_deg, snow_clean = val_dataset[snow_idx]
+            fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
+            fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
 
     best_val_psnr = 0.0
 
