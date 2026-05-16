@@ -95,35 +95,15 @@ def main():
     # --- W&B Visual Sample Setup ---
     fixed_deg, fixed_clean = None, None
     if accelerator.is_main_process:
-        # Find the very first rain image in the validation set
+        # Just grab the first rain and first snow image in the validation set
         rain_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'rain' in name)
-        rain_name = val_dataset.degraded_images[rain_idx]
+        snow_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'snow' in name)
 
-        # Extract the exact Image ID (e.g., from "rain-42.png" -> "42")
-        image_id = rain_name.replace('rain-', '').replace('.png', '')
+        rain_deg, rain_clean = val_dataset[rain_idx]
+        snow_deg, snow_clean = val_dataset[snow_idx]
 
-        # Find the EXACT corresponding snow image with that same ID
-        target_snow_name = f"snow-{image_id}.png"
-
-        try:
-            snow_idx = val_dataset.degraded_images.index(target_snow_name)
-
-            rain_deg, rain_clean = val_dataset[rain_idx]
-            snow_deg, snow_clean = val_dataset[snow_idx]
-
-            fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
-            fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
-            print(f"W&B Visuals locked to Image ID: {image_id} for both Rain and Snow.")
-
-        except ValueError:
-            # Fallback just in case the dataset doesn't have perfectly matching IDs
-            print(
-                f"Warning: Could not find matching snow image for ID {image_id}. Falling back to random snow image.")
-            snow_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'snow' in name)
-            rain_deg, rain_clean = val_dataset[rain_idx]
-            snow_deg, snow_clean = val_dataset[snow_idx]
-            fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
-            fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
+        fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
+        fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
 
     best_val_psnr = 0.0
 
@@ -234,7 +214,7 @@ def main():
                 best_val_psnr = current_val_psnr
                 best_model_path = os.path.join(args.save_dir, "best_model.pth")
                 torch.save(unwrapped_model.state_dict(), best_model_path)
-                tqdm.write(f"🌟 New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
+                tqdm.write(f"New Best Model Saved (Val PSNR: {best_val_psnr:.2f})")
 
     # --- FINAL W&B UPLOAD ---
     # We wait for everyone to finish the epoch loop, then upload the local files to the cloud.
