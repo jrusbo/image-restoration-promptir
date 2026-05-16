@@ -137,7 +137,7 @@ def main():
             accelerator.backward(loss)
 
             if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                accelerator.clip_grad_norm_(model.parameters(), 0.01)
 
             optimizer.step()
 
@@ -147,9 +147,9 @@ def main():
 
             if accelerator.is_local_main_process:
                 train_pbar.set_postfix({
-                    'Loss': f"{loss.item():.4f}",
-                    'Char': f"{loss_dict['loss_char']:.4f}",
-                    'FFT': f"{loss_dict['loss_fft']:.4f}"
+                    'Loss': f"{loss.item():.3f}",
+                    'C': f"{loss_dict['loss_char']:.3f}",
+                    'F': f"{loss_dict['loss_fft']:.3f}"
                 })
 
         scheduler.step()
