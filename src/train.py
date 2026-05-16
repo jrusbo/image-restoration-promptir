@@ -140,10 +140,10 @@ def main():
     val_psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(accelerator.device)
     val_ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(accelerator.device)
 
-    # Register objects for checkpointing
+    # Keep training progress in one rolling metadata file.
     training_state = TrainingState()
-    accelerator.register_for_checkpointing(training_state)
-    accelerator.register_for_checkpointing(scheduler)
+    # accelerator.register_for_checkpointing(training_state)
+    # accelerator.register_for_checkpointing(scheduler)
 
     # Pass all components to accelerate
     model, optimizer, train_dataloader, val_dataloader, scheduler, criterion = accelerator.prepare(
@@ -158,7 +158,13 @@ def main():
     if args.resume_from_checkpoint:
         accelerator.print(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
         accelerator.load_state(args.resume_from_checkpoint)
-        # training_state.epoch and training_state.best_val_psnr are now updated
+
+        # Restore epoch/best metric from a single manual state file if present.
+        training_state_path = os.path.join(args.resume_from_checkpoint, "training_state.pth")
+        if os.path.exists(training_state_path):
+            state_dict = torch.load(training_state_path, map_location="cpu")
+            training_state.load_state_dict(state_dict)
+            tqdm.write(f"Resumed training state from {training_state_path}")
 
     # --- W&B Visual Sample Setup ---
     fixed_deg, fixed_clean = None, None
@@ -315,6 +321,9 @@ def main():
                 checkpoint_dir = os.path.join(args.save_dir, "checkpoint_last")
                 accelerator.save_state(checkpoint_dir)
                 if accelerator.is_main_process:
+                    # Single rolling metadata checkpoint (always overwritten).
+                    training_state_path = os.path.join(checkpoint_dir, "training_state.pth")
+                    torch.save(training_state.state_dict(), training_state_path)
                     tqdm.write(f"Checkpoint saved to {checkpoint_dir}")
 
             # Hard stop if time limit reached
