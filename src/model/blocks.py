@@ -3,7 +3,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class LayerNorm2d(nn.Module):
+    """LayerNorm specifically for 4D Image Tensors (B, C, H, W)."""
+    def __init__(self, channels, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(channels))
+        self.bias = nn.Parameter(torch.zeros(channels))
+        self.eps = eps
+
+    def forward(self, x):
+        # Move channels to the end, normalize, and move back
+        # This is more efficient for the compiler than many small permutes
+        u = x.mean(1, keepdim=True)
+        s = (x - u).pow(2).mean(1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.eps)
+        x = self.weight.view(1, -1, 1, 1) * x + self.bias.view(1, -1, 1, 1)
+        return x
+
+
 class TLC(nn.Module):
+# ... rest of the file ...
     """Test-Time Local Converter for Global Average Pooling to mitigate train-test shift."""
 
     def __init__(self, kernel_size=7):
@@ -94,31 +113,22 @@ class MDTA(nn.Module):
     def forward(self, x):
         b, c, h, w = x.shape
 
-        # Generate query, key, value tensors
         qkv = self.qkv_dwconv(self.qkv(x))
         q, k, v = qkv.chunk(3, dim=1)
 
-        # Calculate channels per head
-        head_c = q.shape[1] // self.num_heads
+        # Reshape for multi-head attention
+        q = q.reshape(b, self.num_heads, -1, h * w)
+        k = k.reshape(b, self.num_heads, -1, h * w)
+        v = v.reshape(b, self.num_heads, -1, h * w)
 
-        # Native PyTorch replacement for einops: 'b (head c) h w -> b head c (h w)'
-        q = q.view(b, self.num_heads, head_c, h * w)
-        k = k.view(b, self.num_heads, head_c, h * w)
-        v = v.view(b, self.num_heads, head_c, h * w)
-
-        # L2 Normalization across the spatial dimension
         q = torch.nn.functional.normalize(q, dim=-1)
         k = torch.nn.functional.normalize(k, dim=-1)
 
-        # Transposed Attention (computing across channels rather than spatial patches)
         attn = (q @ k.transpose(-2, -1)) * self.temperature
         attn = attn.softmax(dim=-1)
 
-        # Apply attention to values
         out = (attn @ v)
-
-        # Native PyTorch replacement for einops: 'b head c (h w) -> b (head c) h w'
-        out = out.view(b, self.num_heads * head_c, h, w)
+        out = out.reshape(b, c, h, w)
 
         return self.project_out(out)
 
@@ -144,13 +154,12 @@ class GDFN(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, dim, num_heads=8):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
+        self.norm1 = LayerNorm2d(dim)
         self.attn = MDTA(dim, num_heads)
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm2 = LayerNorm2d(dim)
         self.ffn = GDFN(dim)
 
     def forward(self, x):
-        # LayerNorm expects channel last: (b, c, h, w) -> (b, h, w, c)
-        x = x + self.attn(self.norm1(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2))
-        x = x + self.ffn(self.norm2(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2))
+        x = x + self.attn(self.norm1(x))
+        x = x + self.ffn(self.norm2(x))
         return x

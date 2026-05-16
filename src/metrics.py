@@ -45,7 +45,8 @@ class CompositeLoss(nn.Module):
         total_loss = loss_char + (self.fft_weight * loss_fft)
 
         # Return total loss and a dictionary of individual metrics for W&B
+        # We return tensors; the training loop will call .item() to avoid graph breaks
         return total_loss, {
-            "loss_char": loss_char.item(),
-            "loss_fft": loss_fft.item()
+            "loss_char": loss_char,
+            "loss_fft": loss_fft
         }

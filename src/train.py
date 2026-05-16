@@ -76,10 +76,12 @@ def main():
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint directory to resume from")
     parser.add_argument("--checkpoint_interval", type=int, default=1, help="Save checkpoint every N epochs")
     parser.add_argument("--wandb_id", type=str, default=None, help="W&B run ID to resume")
-    parser.add_argument("--max_hours", type=float, default=11.7, help="Hard stop training after N hours")
+    parser.add_argument("--max_hours", type=float, default=11.5, help="Hard stop training after N hours")
+    parser.add_argument("--compile", action="store_true", help="Use torch.compile to speed up training")
     args = parser.parse_args()
 
     start_time = time.time()
+
     accelerator = Accelerator(log_with="wandb", mixed_precision="fp16")
     set_seed(42 + accelerator.process_index)
 
@@ -148,6 +150,10 @@ def main():
         model, optimizer, train_dataloader, val_dataloader, scheduler, criterion
     )
 
+    if args.compile:
+        accelerator.print("Compiling model for faster training...")
+        model = torch.compile(model)
+
     # Resume from checkpoint if provided
     if args.resume_from_checkpoint:
         accelerator.print(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
@@ -210,8 +216,8 @@ def main():
                 if accelerator.is_local_main_process:
                     train_pbar.set_postfix({
                         'Loss': f"{loss.item():.3f}",
-                        'C': f"{loss_dict['loss_char']:.3f}",
-                        'F': f"{loss_dict['loss_fft']:.3f}"
+                        'C': f"{loss_dict['loss_char'].item():.3f}",
+                        'F': f"{loss_dict['loss_fft'].item():.3f}"
                     })
 
             scheduler.step()
@@ -248,8 +254,8 @@ def main():
             current_val_psnr = val_psnr_metric.compute().item()
             current_val_ssim = val_ssim_metric.compute().item()
             avg_val_loss = np.mean(epoch_val_losses)
-            avg_val_char = np.mean(epoch_val_char)
-            avg_val_fft = np.mean(epoch_val_fft)
+            avg_val_char = np.mean([l.item() if torch.is_tensor(l) else l for l in epoch_val_char])
+            avg_val_fft = np.mean([l.item() if torch.is_tensor(l) else l for l in epoch_val_fft])
 
             # --- LOGGING & SAVING ---
             if accelerator.is_main_process:
