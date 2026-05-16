@@ -21,8 +21,8 @@ class FFTLoss(nn.Module):
         super().__init__()
 
     def forward(self, pred, target):
-        pred_fft = torch.fft.fft2(pred, norm='backward')
-        target_fft = torch.fft.fft2(target, norm='backward')
+        pred_fft = torch.fft.rfft2(pred, norm='backward')
+        target_fft = torch.fft.rfft2(target, norm='backward')
 
         pred_amp = torch.abs(pred_fft)
         target_amp = torch.abs(target_fft)

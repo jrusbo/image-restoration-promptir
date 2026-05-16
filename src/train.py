@@ -179,25 +179,34 @@ def main():
         if accelerator.is_main_process:
 
             # W&B Visuals: Generate grid using the fixed rain/snow samples
-            with torch.no_grad():
-                fixed_pred = torch.clamp(model(fixed_deg), 0.0, 1.0)
+            if fixed_deg is not None:
+                with torch.no_grad():
+                    fixed_pred = torch.clamp(model(fixed_deg), 0.0, 1.0)
 
-                # Top Row: Rain (In | Pred | Clean)
-                row_rain = torch.cat([fixed_deg[0], fixed_pred[0], fixed_clean[0]], dim=2)
-                # Bottom Row: Snow (In | Pred | Clean)
-                row_snow = torch.cat([fixed_deg[1], fixed_pred[1], fixed_clean[1]], dim=2)
+                    # Top Row: Rain (In | Pred | Clean)
+                    row_rain = torch.cat([fixed_deg[0], fixed_pred[0], fixed_clean[0]], dim=2)
+                    # Bottom Row: Snow (In | Pred | Clean)
+                    row_snow = torch.cat([fixed_deg[1], fixed_pred[1], fixed_clean[1]], dim=2)
 
-                stitched_grid = torch.cat([row_rain, row_snow], dim=1)  # Stack vertically
+                    stitched_grid = torch.cat([row_rain, row_snow], dim=1)  # Stack vertically
 
-            accelerator.log({
-                "Train/Loss": avg_train_loss,
-                "Train/PSNR": current_train_psnr,
-                "Val/Loss": avg_val_loss,
-                "Val/PSNR": current_val_psnr,
-                "Val/SSIM": current_val_ssim,
-                "Visuals/Restoration": wandb.Image(stitched_grid,
-                                                   caption="Top: Rain, Bottom: Snow | Left: Degraded, Mid: Restored, Right: Clean")
-            }, step=epoch)
+                accelerator.log({
+                    "Train/Loss": avg_train_loss,
+                    "Train/PSNR": current_train_psnr,
+                    "Val/Loss": avg_val_loss,
+                    "Val/PSNR": current_val_psnr,
+                    "Val/SSIM": current_val_ssim,
+                    "Visuals/Restoration": wandb.Image(stitched_grid,
+                                                       caption="Top: Rain, Bottom: Snow | Left: Degraded, Mid: Restored, Right: Clean")
+                }, step=epoch)
+            else:
+                accelerator.log({
+                    "Train/Loss": avg_train_loss,
+                    "Train/PSNR": current_train_psnr,
+                    "Val/Loss": avg_val_loss,
+                    "Val/PSNR": current_val_psnr,
+                    "Val/SSIM": current_val_ssim,
+                }, step=epoch)
 
             tqdm.write(
                 f"Train Loss: {avg_train_loss:.4f} | Val PSNR: {current_val_psnr:.2f} | Val SSIM: {current_val_ssim:.4f}")

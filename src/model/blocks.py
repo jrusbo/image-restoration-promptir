@@ -81,7 +81,7 @@ class DGPB(nn.Module):
 
 
 class MDTA(nn.Module):
-    """Multi-Dconv Head Transposed Attention."""
+    """Multi-Dconv Head Transposed Attention (Pure PyTorch, no einops)."""
 
     def __init__(self, dim, num_heads):
         super().__init__()
@@ -94,21 +94,33 @@ class MDTA(nn.Module):
 
     def forward(self, x):
         b, c, h, w = x.shape
+
+        # Generate query, key, value tensors
         qkv = self.qkv_dwconv(self.qkv(x))
         q, k, v = qkv.chunk(3, dim=1)
 
-        q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-        k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
-        v = rearrange(v, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
+        # Calculate channels per head
+        head_c = q.shape[1] // self.num_heads
 
+        # Native PyTorch replacement for einops: 'b (head c) h w -> b head c (h w)'
+        q = q.view(b, self.num_heads, head_c, h * w)
+        k = k.view(b, self.num_heads, head_c, h * w)
+        v = v.view(b, self.num_heads, head_c, h * w)
+
+        # L2 Normalization across the spatial dimension
         q = torch.nn.functional.normalize(q, dim=-1)
         k = torch.nn.functional.normalize(k, dim=-1)
 
+        # Transposed Attention (computing across channels rather than spatial patches)
         attn = (q @ k.transpose(-2, -1)) * self.temperature
         attn = attn.softmax(dim=-1)
 
+        # Apply attention to values
         out = (attn @ v)
-        out = rearrange(out, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
+
+        # Native PyTorch replacement for einops: 'b head c (h w) -> b (head c) h w'
+        out = out.view(b, self.num_heads * head_c, h, w)
+
         return self.project_out(out)
 
 
@@ -139,17 +151,7 @@ class TransformerBlock(nn.Module):
         self.ffn = GDFN(dim)
 
     def forward(self, x):
-        b, c, h, w = x.shape
-        # LayerNorm expects channel last
-        x_norm = rearrange(x, 'b c h w -> b h w c')
-        x_norm = self.norm1(x_norm)
-        x_norm = rearrange(x_norm, 'b h w c -> b c h w')
-
-        x = x + self.attn(x_norm)
-
-        x_norm = rearrange(x, 'b c h w -> b h w c')
-        x_norm = self.norm2(x_norm)
-        x_norm = rearrange(x_norm, 'b h w c -> b c h w')
-
-        x = x + self.ffn(x_norm)
+        # LayerNorm expects channel last: (b, c, h, w) -> (b, h, w, c)
+        x = x + self.attn(self.norm1(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2))
+        x = x + self.ffn(self.norm2(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2))
         return x

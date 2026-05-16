@@ -43,10 +43,16 @@ def invert_ensemble_transform(img_tensor, transform_idx):
     elif transform_idx == 4:
         return torch.flip(img_tensor, [3])
     elif transform_idx == 5:
+        # Original: flip(rot90(img, 1), [3])
+        # Invert: rot90(flip(img, [3]), -1)
         return torch.rot90(torch.flip(img_tensor, [3]), -1, [2, 3])
     elif transform_idx == 6:
+        # Original: flip(rot90(img, 2), [3])
+        # Invert: rot90(flip(img, [3]), -2)
         return torch.rot90(torch.flip(img_tensor, [3]), -2, [2, 3])
     elif transform_idx == 7:
+        # Original: flip(rot90(img, 3), [3])
+        # Invert: rot90(flip(img, [3]), -3)
         return torch.rot90(torch.flip(img_tensor, [3]), -3, [2, 3])
     return img_tensor
 
@@ -73,7 +79,7 @@ def main():
     model.load_state_dict(state_dict)
     model.eval()
 
-    dataset = RestorationDataset(root_dir=args.data_dir, is_train=False)
+    dataset = RestorationDataset(root_dir=args.data_dir, mode='test')
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
 
     images_dict = {}
