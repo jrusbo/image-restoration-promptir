@@ -81,7 +81,7 @@ class DGPB(nn.Module):
 
 
 class MDTA(nn.Module):
-    """Multi-Dconv Head Transposed Attention (Pure PyTorch, no einops)."""
+    """Multi-Dconv Head Transposed Attention"""
 
     def __init__(self, dim, num_heads):
         super().__init__()

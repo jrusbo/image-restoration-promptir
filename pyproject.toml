@@ -8,7 +8,6 @@ dependencies = [
     "torchvision==0.27.0+cu130",
     "torchmetrics==1.9.0",
     "accelerate==1.13.0",
-    "einops==0.8.2",
     "pillow>=12.2.0",
     "wandb>=0.27.0",
     "tqdm>=4.67.3",
