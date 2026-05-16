@@ -340,16 +340,19 @@ def main():
             tqdm.write("\nUploading final results to Weights & Biases...")
 
             # Upload Best Model
-            if os.path.exists(os.path.join(args.save_dir, "best_model.pth")):
-                wandb.save(os.path.join(args.save_dir, "best_model.pth"), base_path=args.save_dir)
+            best_model_path = os.path.join(args.save_dir, "best_model.pth")
+            if os.path.exists(best_model_path):
+                wandb.save(best_model_path, base_path=args.save_dir)
                 tqdm.write("best_model.pth uploaded.")
 
-            # Upload the final training state (checkpoint_last) for archiving
+            # Upload the final training state (checkpoint_last) using artifacts for proper overwriting.
+            # Artifacts with version "latest" will overwrite on each run.
             checkpoint_dir = os.path.join(args.save_dir, "checkpoint_last")
             if os.path.exists(checkpoint_dir):
-                # wandb.save(glob) will preserve the directory structure if base_path is set correctly
-                wandb.save(os.path.join(checkpoint_dir, "*"), base_path=args.save_dir)
-                tqdm.write("Final checkpoint_last uploaded to W&B.")
+                artifact = wandb.Artifact(name="checkpoint_last", type="checkpoint", description="Latest training checkpoint")
+                artifact.add_dir(checkpoint_dir)
+                wandb.log_artifact(artifact, aliases=["latest"])
+                tqdm.write("Final checkpoint_last uploaded to W&B with 'latest' alias (overwritten).")
 
         accelerator.end_training()
 
