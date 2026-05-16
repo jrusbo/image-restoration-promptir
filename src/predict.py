@@ -1,7 +1,6 @@
 import argparse
 import numpy as np
 import torch
-import torchvision.transforms.functional as TF
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -84,7 +83,7 @@ def main():
 
     images_dict = {}
 
-    print("🖼️ Commencing Test-Time Inference with Native 8-Fold Ensemble...")
+    print("Commencing Test-Time Inference with Native 8-Fold Ensemble...")
     with torch.no_grad():
         for degraded, filename in tqdm(dataloader, desc="Restoring Images", dynamic_ncols=True):
             degraded = degraded.to(device)

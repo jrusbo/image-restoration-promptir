@@ -221,4 +221,5 @@ __marimo__/
 /dataset/
 /checkpoints/
 /wandb/
-pred.npz
+/pred.npz
+/pred.zip

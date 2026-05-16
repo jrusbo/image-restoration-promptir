@@ -95,15 +95,19 @@ def main():
     # --- W&B Visual Sample Setup ---
     fixed_deg, fixed_clean = None, None
     if accelerator.is_main_process:
-        # Just grab the first rain and first snow image in the validation set
-        rain_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'rain' in name)
-        snow_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'snow' in name)
+        try:
+            # Just grab the first rain and first snow image in the validation set
+            rain_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'rain' in name)
+            snow_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'snow' in name)
 
-        rain_deg, rain_clean = val_dataset[rain_idx]
-        snow_deg, snow_clean = val_dataset[snow_idx]
+            rain_deg, rain_clean = val_dataset[rain_idx]
+            snow_deg, snow_clean = val_dataset[snow_idx]
 
-        fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
-        fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
+            fixed_deg = torch.stack([rain_deg, snow_deg]).to(accelerator.device)
+            fixed_clean = torch.stack([rain_clean, snow_clean]).to(accelerator.device)
+        except StopIteration:
+            tqdm.write("Warning: Could not find both rain and snow images in validation set for visualization.")
+            fixed_deg, fixed_clean = None, None
 
     best_val_psnr = 0.0
 
@@ -128,12 +132,12 @@ def main():
 
             optimizer.zero_grad()
             output = model(degraded)
-            loss, _ = criterion(output, clean)
+            loss, loss_dict = criterion(output, clean)
 
             accelerator.backward(loss)
 
             if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(model.parameters(), 0.01)
+                accelerator.clip_grad_norm_(model.parameters(), 1.0)
 
             optimizer.step()
 
@@ -142,7 +146,11 @@ def main():
             epoch_train_losses.append(loss.item())
 
             if accelerator.is_local_main_process:
-                train_pbar.set_postfix({'Loss': f"{loss.item():.4f}"})
+                train_pbar.set_postfix({
+                    'Loss': f"{loss.item():.4f}",
+                    'Char': f"{loss_dict['loss_char']:.4f}",
+                    'FFT': f"{loss_dict['loss_fft']:.4f}"
+                })
 
         scheduler.step()
         accelerator.wait_for_everyone()
@@ -155,6 +163,8 @@ def main():
         val_psnr_metric.reset()
         val_ssim_metric.reset()
         epoch_val_losses = []
+        epoch_val_char = []
+        epoch_val_fft = []
 
         val_pbar = tqdm(val_dataloader, desc="Validation", leave=False, disable=not accelerator.is_local_main_process,
                         file=sys.stdout, dynamic_ncols=True)
@@ -162,18 +172,22 @@ def main():
         with torch.no_grad():
             for degraded, clean in val_pbar:
                 output = model(degraded)
-                loss, _ = criterion(output, clean)
+                loss, loss_dict = criterion(output, clean)
 
                 output_clamped = torch.clamp(output, 0.0, 1.0)
                 val_psnr_metric.update(output_clamped, clean)
                 val_ssim_metric.update(output_clamped, clean)
                 epoch_val_losses.append(loss.item())
+                epoch_val_char.append(loss_dict['loss_char'])
+                epoch_val_fft.append(loss_dict['loss_fft'])
 
         accelerator.wait_for_everyone()
 
         current_val_psnr = val_psnr_metric.compute().item()
         current_val_ssim = val_ssim_metric.compute().item()
         avg_val_loss = np.mean(epoch_val_losses)
+        avg_val_char = np.mean(epoch_val_char)
+        avg_val_fft = np.mean(epoch_val_fft)
 
         # --- LOGGING & SAVING ---
         if accelerator.is_main_process:
@@ -194,6 +208,8 @@ def main():
                     "Train/Loss": avg_train_loss,
                     "Train/PSNR": current_train_psnr,
                     "Val/Loss": avg_val_loss,
+                    "Val/Char_Loss": avg_val_char,
+                    "Val/FFT_Loss": avg_val_fft,
                     "Val/PSNR": current_val_psnr,
                     "Val/SSIM": current_val_ssim,
                     "Visuals/Restoration": wandb.Image(stitched_grid,
@@ -204,6 +220,8 @@ def main():
                     "Train/Loss": avg_train_loss,
                     "Train/PSNR": current_train_psnr,
                     "Val/Loss": avg_val_loss,
+                    "Val/Char_Loss": avg_val_char,
+                    "Val/FFT_Loss": avg_val_fft,
                     "Val/PSNR": current_val_psnr,
                     "Val/SSIM": current_val_ssim,
                 }, step=epoch)
