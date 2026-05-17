@@ -71,9 +71,16 @@ def main():
     print(f"Loading weights from {args.weights}...")
     state_dict = torch.load(args.weights, map_location=device)
 
-    # Strip DDP 'module.' prefix if weights were saved directly from unwrapped DDP model
-    if list(state_dict.keys())[0].startswith('module.'):
-        state_dict = {k[7:]: v for k, v in state_dict.items()}
+    # Strip DDP 'module.' or torch.compile '_orig_mod.' prefixes if present
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            new_state_dict[k[7:]] = v
+        elif k.startswith('_orig_mod.'):
+            new_state_dict[k[10:]] = v
+        else:
+            new_state_dict[k] = v
+    state_dict = new_state_dict
 
     model.load_state_dict(state_dict)
     model.eval()
