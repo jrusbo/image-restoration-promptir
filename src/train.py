@@ -131,9 +131,9 @@ def main():
     model = PromptIR()
     # model = torch.compile(model)
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=1e-3)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
-    criterion = CompositeLoss(fft_weight=0.1)
+    criterion = CompositeLoss(fft_weight=0.1, edge_weight=0.2)
 
     # Separate metrics for Train and Val
     train_psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(accelerator.device)
@@ -211,7 +211,7 @@ def main():
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), 0.01)
+                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
 
                 optimizer.step()
 
@@ -223,7 +223,8 @@ def main():
                     train_pbar.set_postfix({
                         'Loss': f"{loss.item():.3f}",
                         'C': f"{loss_dict['loss_char'].item():.3f}",
-                        'F': f"{loss_dict['loss_fft'].item():.3f}"
+                        'F': f"{loss_dict['loss_fft'].item():.3f}",
+                        'E': f"{loss_dict['loss_edge'].item():.3f}"
                     })
 
             scheduler.step()
@@ -239,6 +240,7 @@ def main():
             epoch_val_losses = []
             epoch_val_char = []
             epoch_val_fft = []
+            epoch_val_edge = []
 
             val_pbar = tqdm(val_dataloader, desc="Validation", leave=False, disable=not accelerator.is_local_main_process,
                             file=sys.stdout, dynamic_ncols=True)
@@ -254,6 +256,7 @@ def main():
                     epoch_val_losses.append(loss.item())
                     epoch_val_char.append(loss_dict['loss_char'])
                     epoch_val_fft.append(loss_dict['loss_fft'])
+                    epoch_val_edge.append(loss_dict['loss_edge'])
 
             accelerator.wait_for_everyone()
 
@@ -262,6 +265,7 @@ def main():
             avg_val_loss = np.mean(epoch_val_losses)
             avg_val_char = np.mean([l.item() if torch.is_tensor(l) else l for l in epoch_val_char])
             avg_val_fft = np.mean([l.item() if torch.is_tensor(l) else l for l in epoch_val_fft])
+            avg_val_edge = np.mean([l.item() if torch.is_tensor(l) else l for l in epoch_val_edge])
 
             # --- LOGGING & SAVING ---
             if accelerator.is_main_process:
@@ -284,6 +288,7 @@ def main():
                         "Val/Loss": avg_val_loss,
                         "Val/Char_Loss": avg_val_char,
                         "Val/FFT_Loss": avg_val_fft,
+                        "Val/Edge_Loss": avg_val_edge,
                         "Val/PSNR": current_val_psnr,
                         "Val/SSIM": current_val_ssim,
                         "Visuals/Restoration": wandb.Image(stitched_grid,
@@ -296,6 +301,7 @@ def main():
                         "Val/Loss": avg_val_loss,
                         "Val/Char_Loss": avg_val_char,
                         "Val/FFT_Loss": avg_val_fft,
+                        "Val/Edge_Loss": avg_val_edge,
                         "Val/PSNR": current_val_psnr,
                         "Val/SSIM": current_val_ssim,
                     }, step=epoch)
