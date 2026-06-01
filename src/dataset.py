@@ -1,6 +1,7 @@
 import os
 import random
 from PIL import Image
+from typing import Tuple, Union, List, Optional
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
@@ -8,10 +9,32 @@ from torchvision import tv_tensors
 
 
 class RestorationDataset(Dataset):
-    def __init__(self, root_dir, mode='train', val_split=0.1, seed=42):
-        """
-        mode: 'train', 'val', or 'test'
-        val_split: Percentage of data to reserve for validation (default 10%)
+    """Dataset for image restoration tasks, supporting rain and snow degradations.
+
+    Attributes:
+        root_dir (str): Root directory of the dataset.
+        mode (str): Dataset mode ('train', 'val', or 'test').
+        degraded_dir (str): Directory containing degraded images.
+        clean_dir (Optional[str]): Directory containing clean images.
+        degraded_images (List[str]): List of filenames for degraded images.
+        geom_transforms (Optional[v2.Compose]): Geometric augmentations for training.
+        to_tensor (v2.Compose): Transform to convert images to tensors.
+    """
+
+    def __init__(
+        self,
+        root_dir: str,
+        mode: str = 'train',
+        val_split: float = 0.1,
+        seed: int = 42
+    ):
+        """Initializes the RestorationDataset.
+
+        Args:
+            root_dir: Root directory of the dataset.
+            mode: 'train', 'val', or 'test'.
+            val_split: Percentage of data to reserve for validation.
+            seed: Random seed for reproducible splits.
         """
         self.root_dir = root_dir
         self.mode = mode
@@ -20,10 +43,9 @@ class RestorationDataset(Dataset):
             self.degraded_dir = os.path.join(root_dir, 'degraded')
             self.clean_dir = os.path.join(root_dir, 'clean')
 
-            # Fetch all images
             all_images = sorted(os.listdir(self.degraded_dir))
 
-            # Separate by degradation type to ensure a perfectly balanced 90/10 split
+            # Separate by degradation type to ensure a perfectly balanced split
             rain_images = [f for f in all_images if 'rain' in f]
             snow_images = [f for f in all_images if 'snow' in f]
 
@@ -40,7 +62,6 @@ class RestorationDataset(Dataset):
             else:  # val
                 self.degraded_images = rain_images[split_idx_rain:] + snow_images[split_idx_snow:]
 
-            # Geometric transforms only defined for training
             self.geom_transforms = v2.Compose([
                 v2.RandomHorizontalFlip(p=0.5),
                 v2.RandomVerticalFlip(p=0.5),
@@ -55,25 +76,37 @@ class RestorationDataset(Dataset):
         else:  # test
             self.degraded_dir = os.path.join(root_dir, 'degraded')
             self.degraded_images = sorted(os.listdir(self.degraded_dir))
+            self.clean_dir = None
 
-        # Standard tensor conversion
         self.to_tensor = v2.Compose([
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True)
         ])
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """Returns the number of images in the dataset.
+
+        Returns:
+            The total number of samples.
+        """
         return len(self.degraded_images)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, str]]:
+        """Retrieves a sample from the dataset.
+
+        Args:
+            idx: Index of the sample to retrieve.
+
+        Returns:
+            If mode is 'train' or 'val': A tuple of (degraded_tensor, clean_tensor).
+            If mode is 'test': A tuple of (degraded_tensor, filename).
+        """
         degraded_name = self.degraded_images[idx]
         degraded_path = os.path.join(self.degraded_dir, degraded_name)
 
-        # Convert to RGB to ensure 3 channels
         degraded_img = Image.open(degraded_path).convert('RGB')
 
         if self.mode in ['train', 'val']:
-            # Map degraded filename to clean filename
             if 'rain' in degraded_name:
                 clean_name = degraded_name.replace('rain-', 'rain_clean-')
             elif 'snow' in degraded_name:
@@ -87,7 +120,6 @@ class RestorationDataset(Dataset):
             degraded_tensor = tv_tensors.Image(degraded_img)
             clean_tensor = tv_tensors.Image(clean_img)
 
-            # Only apply stochastic augmentations during 'train' mode
             if self.mode == 'train':
                 degraded_tensor, clean_tensor = self.geom_transforms(degraded_tensor, clean_tensor)
 

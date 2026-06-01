@@ -9,6 +9,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import wandb
+from typing import Dict, Any, Tuple
 
 from accelerate import Accelerator
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
@@ -19,15 +20,30 @@ from metrics import CompositeLoss
 
 
 def set_seed(seed: int) -> None:
-    """Fix seed for reproducibility."""
+    """Fix seed for reproducibility.
+
+    Args:
+        seed: The random seed to use.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
 
-def apply_dense_mixup_cutmix(x: torch.Tensor, y: torch.Tensor, alpha: float = 1.2):
-    """Custom dense blending for Image-to-Image tasks."""
+def apply_dense_mixup_cutmix(x: torch.Tensor, y: torch.Tensor, alpha: float = 1.2) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Custom dense blending for Image-to-Image tasks.
+
+    Randomly applies either MixUp or CutMix to a batch of images and their corresponding targets.
+
+    Args:
+        x: Input image batch tensor.
+        y: Target image batch tensor.
+        alpha: Beta distribution parameter for blending ratio.
+
+    Returns:
+        A tuple of (mixed_input, mixed_target).
+    """
     batch_size = x.size(0)
     index = torch.randperm(batch_size, device=x.device)
     lam = np.random.beta(alpha, alpha)
@@ -52,20 +68,38 @@ def apply_dense_mixup_cutmix(x: torch.Tensor, y: torch.Tensor, alpha: float = 1.
 
 
 class TrainingState:
-    """Helper class to track training progress for checkpointing."""
+    """Helper class to track training progress for checkpointing.
+
+    Attributes:
+        epoch (int): Current epoch number.
+        best_val_psnr (float): Best validation PSNR achieved so far.
+    """
+
     def __init__(self):
+        """Initializes the TrainingState."""
         self.epoch = 0
         self.best_val_psnr = 0.0
 
-    def state_dict(self):
+    def state_dict(self) -> Dict[str, Any]:
+        """Returns the state dictionary.
+
+        Returns:
+            A dictionary containing the current epoch and best validation PSNR.
+        """
         return {"epoch": self.epoch, "best_val_psnr": self.best_val_psnr}
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Loads the state dictionary.
+
+        Args:
+            state_dict: A dictionary containing epoch and best_val_psnr.
+        """
         self.epoch = state_dict.get("epoch", 0)
         self.best_val_psnr = state_dict.get("best_val_psnr", 0.0)
 
 
-def main():
+def main() -> None:
+    """Main training loop orchestration."""
     parser = argparse.ArgumentParser(description="Train PromptIR with Accelerate & Validation")
     parser.add_argument("--data_dir", type=str, default="dataset/train")
     parser.add_argument("--epochs", type=int, default=100)
@@ -86,8 +120,6 @@ def main():
     set_seed(42 + accelerator.process_index)
 
     if args.resume_from_checkpoint:
-        # If resuming, we want to stay in the same folder
-        # Expected path: checkpoints/run_name/checkpoint_last
         checkpoint_path = os.path.normpath(args.resume_from_checkpoint)
         args.save_dir = os.path.dirname(checkpoint_path)
 
@@ -107,20 +139,16 @@ def main():
         
         accelerator.init_trackers("PromptIR-Restoration", config=vars(args), init_kwargs=init_kwargs)
         
-        # If not resuming, create a new run folder
         if not args.resume_from_checkpoint:
             run_name = wandb.run.name if wandb.run.name else "default_run"
             args.save_dir = os.path.join(args.save_dir, run_name)
             os.makedirs(args.save_dir, exist_ok=True)
             
-            # Save W&B ID for future resumes
             with open(os.path.join(args.save_dir, "wandb_id.txt"), "w") as f:
                 f.write(wandb.run.id)
     
-    # Ensure all processes have the updated save_dir
     accelerator.wait_for_everyone()
 
-    # Initialize Train and Validation Datasets
     train_dataset = RestorationDataset(root_dir=args.data_dir, mode='train', val_split=0.1)
     val_dataset = RestorationDataset(root_dir=args.data_dir, mode='val', val_split=0.1)
 
@@ -129,23 +157,17 @@ def main():
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     model = PromptIR()
-    # model = torch.compile(model)
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=1e-3)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
     criterion = CompositeLoss(fft_weight=0.1, edge_weight=0.2)
 
-    # Separate metrics for Train and Val
     train_psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(accelerator.device)
     val_psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(accelerator.device)
     val_ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(accelerator.device)
 
-    # Keep training progress in one rolling metadata file.
     training_state = TrainingState()
-    # accelerator.register_for_checkpointing(training_state)
-    # accelerator.register_for_checkpointing(scheduler)
 
-    # Pass all components to accelerate
     model, optimizer, train_dataloader, val_dataloader, scheduler, criterion = accelerator.prepare(
         model, optimizer, train_dataloader, val_dataloader, scheduler, criterion
     )
@@ -154,23 +176,19 @@ def main():
         accelerator.print("Compiling model for faster training...")
         model = torch.compile(model)
 
-    # Resume from checkpoint if provided
     if args.resume_from_checkpoint:
         accelerator.print(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
         accelerator.load_state(args.resume_from_checkpoint)
 
-        # Restore epoch/best metric from a single manual state file if present.
         training_state_path = os.path.join(args.resume_from_checkpoint, "training_state.pth")
         if os.path.exists(training_state_path):
             state_dict = torch.load(training_state_path, map_location="cpu")
             training_state.load_state_dict(state_dict)
             tqdm.write(f"Resumed training state from {training_state_path}")
 
-    # --- W&B Visual Sample Setup ---
     fixed_deg, fixed_clean = None, None
     if accelerator.is_main_process:
         try:
-            # Just grab the first rain and first snow image in the validation set
             rain_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'rain' in name)
             snow_idx = next(i for i, name in enumerate(val_dataset.degraded_images) if 'snow' in name)
 
@@ -184,19 +202,16 @@ def main():
             fixed_deg, fixed_clean = None, None
 
     try:
-        # Flattened the loops: No outer tqdm wrapper, just cleanly printed epochs.
         for epoch in range(training_state.epoch, args.epochs):
             training_state.epoch = epoch
 
             if accelerator.is_main_process:
                 tqdm.write(f"\n--- Epoch [{epoch + 1}/{args.epochs}] ---")
 
-            # --- TRAINING PHASE ---
             model.train()
             train_psnr_metric.reset()
             epoch_train_losses = []
 
-            # dynamic_ncols fixes the terminal wrapping issue
             train_pbar = tqdm(train_dataloader, desc="Training", leave=False, disable=not accelerator.is_local_main_process,
                               file=sys.stdout, dynamic_ncols=True)
 
@@ -233,7 +248,6 @@ def main():
             current_train_psnr = train_psnr_metric.compute().item()
             avg_train_loss = np.mean(epoch_train_losses)
 
-            # --- VALIDATION PHASE ---
             model.eval()
             val_psnr_metric.reset()
             val_ssim_metric.reset()
@@ -267,20 +281,15 @@ def main():
             avg_val_fft = np.mean([l.item() if torch.is_tensor(l) else l for l in epoch_val_fft])
             avg_val_edge = np.mean([l.item() if torch.is_tensor(l) else l for l in epoch_val_edge])
 
-            # --- LOGGING & SAVING ---
             if accelerator.is_main_process:
-
-                # W&B Visuals: Generate grid using the fixed rain/snow samples
                 if fixed_deg is not None:
                     with torch.no_grad():
                         fixed_pred = torch.clamp(model(fixed_deg), 0.0, 1.0)
 
-                        # Top Row: Rain (In | Pred | Clean)
                         row_rain = torch.cat([fixed_deg[0], fixed_pred[0], fixed_clean[0]], dim=2)
-                        # Bottom Row: Snow (In | Pred | Clean)
                         row_snow = torch.cat([fixed_deg[1], fixed_pred[1], fixed_clean[1]], dim=2)
 
-                        stitched_grid = torch.cat([row_rain, row_snow], dim=1)  # Stack vertically
+                        stitched_grid = torch.cat([row_rain, row_snow], dim=1)
 
                     accelerator.log({
                         "Train/Loss": avg_train_loss,
@@ -309,50 +318,39 @@ def main():
                 tqdm.write(
                     f"Train Loss: {avg_train_loss:.4f} | Val PSNR: {current_val_psnr:.2f} | Val SSIM: {current_val_ssim:.4f}")
 
-                # Save logic now strictly evaluates generalizability via Validation PSNR
                 unwrapped_model = accelerator.unwrap_model(model)
 
-                # Save best model if PSNR improves
                 if current_val_psnr > training_state.best_val_psnr:
                     training_state.best_val_psnr = current_val_psnr
                     best_model_path = os.path.join(args.save_dir, "best_model.pth")
                     torch.save(unwrapped_model.state_dict(), best_model_path)
                     tqdm.write(f"New Best Model Saved (Val PSNR: {training_state.best_val_psnr:.2f})")
 
-            # Increment epoch for next possible resume
             training_state.epoch = epoch + 1
             
-            # Save full training state for resuming
             if (epoch + 1) % args.checkpoint_interval == 0:
                 checkpoint_dir = os.path.join(args.save_dir, "checkpoint_last")
                 accelerator.save_state(checkpoint_dir)
                 if accelerator.is_main_process:
-                    # Single rolling metadata checkpoint (always overwritten).
                     training_state_path = os.path.join(checkpoint_dir, "training_state.pth")
                     torch.save(training_state.state_dict(), training_state_path)
                     tqdm.write(f"Checkpoint saved to {checkpoint_dir}")
 
-            # Hard stop if time limit reached
             elapsed_hours = (time.time() - start_time) / 3600
             if elapsed_hours >= args.max_hours:
                 accelerator.print(f"Time limit reached ({elapsed_hours:.2f} hours). Stopping training to allow upload.")
                 break
 
     finally:
-        # --- FINAL W&B UPLOAD ---
-        # We wait for everyone to finish, then upload the local files to the cloud.
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
             tqdm.write("\nUploading final results to Weights & Biases...")
 
-            # Upload Best Model
             best_model_path = os.path.join(args.save_dir, "best_model.pth")
             if os.path.exists(best_model_path):
                 wandb.save(best_model_path, base_path=args.save_dir)
                 tqdm.write("best_model.pth uploaded.")
 
-            # Upload the final training state (checkpoint_last) using artifacts for proper overwriting.
-            # Artifacts with version "latest" will overwrite on each run.
             checkpoint_dir = os.path.join(args.save_dir, "checkpoint_last")
             if os.path.exists(checkpoint_dir):
                 artifact = wandb.Artifact(name="checkpoint_last", type="checkpoint", description="Latest training checkpoint")

@@ -9,8 +9,16 @@ from model.promptir import PromptIR
 from dataset import RestorationDataset
 
 
-def apply_ensemble_transform(img_tensor, transform_idx):
-    """Applies one of the 8 geometric transformations."""
+def apply_ensemble_transform(img_tensor: torch.Tensor, transform_idx: int) -> torch.Tensor:
+    """Applies one of the 8 geometric transformations for test-time augmentation.
+
+    Args:
+        img_tensor: Input image tensor of shape (B, C, H, W).
+        transform_idx: Index of the transformation (0-7).
+
+    Returns:
+        Transformed image tensor.
+    """
     if transform_idx == 0:
         return img_tensor
     elif transform_idx == 1:
@@ -30,8 +38,16 @@ def apply_ensemble_transform(img_tensor, transform_idx):
     return img_tensor
 
 
-def invert_ensemble_transform(img_tensor, transform_idx):
-    """Inverts the applied geometric transformation to realign predictions."""
+def invert_ensemble_transform(img_tensor: torch.Tensor, transform_idx: int) -> torch.Tensor:
+    """Inverts the applied geometric transformation to realign predictions.
+
+    Args:
+        img_tensor: Predicted image tensor of shape (B, C, H, W).
+        transform_idx: Index of the transformation that was applied (0-7).
+
+    Returns:
+        Realigned image tensor.
+    """
     if transform_idx == 0:
         return img_tensor
     elif transform_idx == 1:
@@ -54,8 +70,16 @@ def invert_ensemble_transform(img_tensor, transform_idx):
     return img_tensor
 
 
-def predict_single(model, img):
-    """Performs inference on a single image, ensuring it's padded to multiple of 8."""
+def predict_single(model: torch.nn.Module, img: torch.Tensor) -> torch.Tensor:
+    """Performs inference on a single image, ensuring it's padded to multiple of 8.
+
+    Args:
+        model: The restoration model.
+        img: Input image tensor of shape (B, C, H, W).
+
+    Returns:
+        Restored image tensor of shape (B, C, H, W).
+    """
     _, _, h, w = img.shape
     pad_h = (8 - h % 8) % 8
     pad_w = (8 - w % 8) % 8
@@ -69,15 +93,29 @@ def predict_single(model, img):
     return out[:, :, :h, :w]
 
 
-def tiled_predict(model, img, tile_size=256, tile_overlap=32):
-    """Performs inference using overlapped tiles with boundary-safe blending."""
+def tiled_predict(
+    model: torch.nn.Module,
+    img: torch.Tensor,
+    tile_size: int = 256,
+    tile_overlap: int = 32
+) -> torch.Tensor:
+    """Performs inference using overlapped tiles with boundary-safe blending.
+
+    Args:
+        model: The restoration model.
+        img: Input image tensor of shape (B, C, H, W).
+        tile_size: Size of the tiles.
+        tile_overlap: Overlap between adjacent tiles.
+
+    Returns:
+        Restored image tensor of shape (B, C, H, W).
+    """
     b, c, h, w = img.shape
     if h <= tile_size and w <= tile_size:
         return predict_single(model, img)
 
     stride = tile_size - tile_overlap
     
-    # Pad image to be multiple of stride + overlap
     pad_h = (stride - (h - tile_overlap) % stride) % stride
     pad_w = (stride - (w - tile_overlap) % stride) % stride
     
@@ -87,7 +125,6 @@ def tiled_predict(model, img, tile_size=256, tile_overlap=32):
     output = torch.zeros_like(img_padded)
     weight = torch.zeros_like(img_padded)
     
-    # Base 1D window
     win_1d = torch.ones(tile_size, device=img.device)
     if tile_overlap > 0:
         ramp = torch.linspace(0, 1, tile_overlap, device=img.device)
@@ -119,7 +156,8 @@ def tiled_predict(model, img, tile_size=256, tile_overlap=32):
     return output[:, :, :h, :w]
 
 
-def main():
+def main() -> None:
+    """Main inference script with ensemble and optional tiling."""
     parser = argparse.ArgumentParser(description="Restoration Inference with 8-Fold Ensemble")
     parser.add_argument("--data_dir", type=str, default="dataset/test", help="Path to test data")
     parser.add_argument("--weights", type=str, required=True, help="Path to best model weights")
@@ -137,7 +175,6 @@ def main():
     print(f"Loading weights from {args.weights}...")
     state_dict = torch.load(args.weights, map_location=device)
 
-    # Clean state dict
     new_state_dict = {}
     for k, v in state_dict.items():
         if k.startswith('module.'):
@@ -172,10 +209,7 @@ def main():
                 realigned_pred = invert_ensemble_transform(pred, i)
                 ensemble_preds.append(realigned_pred)
 
-            # Average 8-fold predictions
             avg_pred = torch.stack(ensemble_preds).mean(dim=0)
-
-            # Post-process to uint8
             avg_pred = torch.clamp(avg_pred, 0.0, 1.0)
             avg_pred_uint8 = (avg_pred.squeeze(0).cpu().numpy() * 255.0).round().astype(np.uint8)
 
